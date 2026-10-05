@@ -1,0 +1,35 @@
+{
+  "name": "dangerous-cargo-stowage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "船舶危险货箱三维舱位配载审定服务 (TypeScript + Node.js + PostgreSQL)",
+  "license": "MIT",
+  "main": "dist/start.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/start.js",
+    "dev": "tsx watch src/start.ts",
+    "test": "node --require tsx/cjs --test test/validator.test.ts test/check.test.ts test/merge.test.ts test/discharge.test.ts test/berthing.test.ts",
+    "e2e": "node test/e2e.js",
+    "e2e:check": "node test/e2e-check.js",
+    "e2e:plans": "node test/e2e-plans.js",
+    "e2e:migrate": "node test/e2e-migrate.js",
+    "e2e:discharge": "node test/e2e-discharge.js",
+    "e2e:berth": "node test/e2e-berth.js",
+    "e2e:adjust": "node test/e2e-adjust.js",
+    "demo": "tsx examples/demo.ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

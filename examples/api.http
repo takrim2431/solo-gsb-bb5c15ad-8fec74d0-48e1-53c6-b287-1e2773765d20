@@ -1,0 +1,290 @@
+### 船舶危险货箱配载审定服务 REST 示例（VS Code REST Client / JetBrains HTTP Client）
+### 变量 @id 在首次创建后手动替换，或用客户端的脚本能力提取。
+
+@host = http://localhost:3000
+@id = 00000000-0000-0000-0000-000000000000
+
+### 健康检查
+GET {{host}}/health
+
+### 登记航次
+POST {{host}}/api/voyages
+Content-Type: application/json
+
+{
+  "voyageNo": "V-2026-001",
+  "bays": 3,
+  "rows": 2,
+  "tiers": 3,
+  "defaultColumnWeightLimit": "10000",
+  "columnWeightLimits": [
+    { "bay": 1, "row": 1, "weightLimit": "1200" }
+  ],
+  "boxes": [
+    { "boxNo": "BOX-1", "weight": "500",    "category": "1" },
+    { "boxNo": "BOX-2", "weight": "600",    "category": "3" },
+    { "boxNo": "BOX-3", "weight": "400",    "category": "5" },
+    { "boxNo": "BOX-4", "weight": "300.25", "category": "1" }
+  ],
+  "incompatRules": [
+    { "categoryA": "1", "categoryB": "3", "minDistance": 3 }
+  ]
+}
+
+### 航次列表
+GET {{host}}/api/voyages
+
+### 当前布局
+GET {{host}}/api/voyages/{{id}}/layout
+
+### 历史布局（某修订号）
+GET {{host}}/api/voyages/{{id}}/layout?rev=1
+
+### 整批调整（携带所见修订号；position=null 表示暂留空；允许同批交换）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 0,
+  "moves": [
+    { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+    { "boxNo": "BOX-2", "position": { "bay": 3, "row": 2, "tier": 0 } },
+    { "boxNo": "BOX-3", "position": { "bay": 2, "row": 2, "tier": 0 } },
+    { "boxNo": "BOX-4", "position": { "bay": 1, "row": 1, "tier": 1 } }
+  ]
+}
+
+### 同批交换（同列上下互换）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 1,
+  "moves": [
+    { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 1 } },
+    { "boxNo": "BOX-4", "position": { "bay": 1, "row": 1, "tier": 0 } }
+  ]
+}
+
+### 撤位（暂留空）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 2,
+  "moves": [
+    { "boxNo": "BOX-3", "position": null }
+  ]
+}
+
+### 安全约束变更（携带所见修订号；整套替换；受理前按新约束复验当前布局）
+### 未列出的按列覆盖/不相容类别对即撤销；舱位尺寸与箱档案不变
+POST {{host}}/api/voyages/{{id}}/constraints
+Content-Type: application/json
+
+{
+  "baseRevision": 2,
+  "defaultColumnWeightLimit": "9000",
+  "columnWeightLimits": [
+    { "bay": 2, "row": 2, "weightLimit": "9999" }
+  ],
+  "incompatRules": [
+    { "categoryA": "1", "categoryB": "5", "minDistance": 2 }
+  ]
+}
+
+### 历史布局同时返回该修订号当时生效的约束（默认承重/覆盖/类别对）
+GET {{host}}/api/voyages/{{id}}/layout?rev=1
+
+### 签发装载清单（所有箱须已配位；冻结当前修订号）
+POST {{host}}/api/voyages/{{id}}/manifests
+Content-Type: application/json
+
+{
+  "expectedRevision": 4
+}
+
+### 清单列表（旧清单保留，current 标识是否指向当前布局）
+GET {{host}}/api/voyages/{{id}}/manifests
+
+### 取某修订号的冻结清单
+GET {{host}}/api/voyages/{{id}}/manifests/4
+
+### 现场装船核对：以已签发清单 rev=4 开启作业（同一清单最多一个）
+POST {{host}}/api/voyages/{{id}}/check-jobs
+Content-Type: application/json
+
+{
+  "manifestRevision": 4
+}
+
+### 航次下的核对作业列表
+GET {{host}}/api/voyages/{{id}}/check-jobs
+
+@jobId = 00000000-0000-0000-0000-000000000000
+
+### 查询核对状态：应装/已核对/缺失/错位/清单外箱
+GET {{host}}/api/check-jobs/{{jobId}}
+
+### 上报实装位置（reportNo 为作业内唯一上报号；相同号+相同内容重试幂等）
+POST {{host}}/api/check-jobs/{{jobId}}/reports
+Content-Type: application/json
+
+{
+  "reportNo": "RPT-0001",
+  "boxNo": "BOX-1",
+  "position": { "bay": 1, "row": 1, "tier": 0 }
+}
+
+### 上报撤销（position=null 表示未装；该箱回到“缺失”）
+POST {{host}}/api/check-jobs/{{jobId}}/reports
+Content-Type: application/json
+
+{
+  "reportNo": "RPT-0002",
+  "boxNo": "BOX-2",
+  "position": null
+}
+
+### 上报留痕（按受理顺序）
+GET {{host}}/api/check-jobs/{{jobId}}/reports
+
+### 结案：全部一致且无清单外箱才冻结；否则 409 返回差异，作业继续开放
+POST {{host}}/api/check-jobs/{{jobId}}/close
+
+### ---- 试排方案 ----
+
+### 从航次当前修订号建立试排方案（以当前布局为初值、固定当前约束快照；label 可省）
+POST {{host}}/api/voyages/{{id}}/plans
+Content-Type: application/json
+
+{
+  "label": "方案A-加密堆存"
+}
+
+### 航次下的试排方案列表
+GET {{host}}/api/voyages/{{id}}/plans
+
+@planId = 00000000-0000-0000-0000-000000000000
+
+### 查询方案：当前试排布局 + 固定约束 + 版本（来源修订号/方案修订号/状态）
+GET {{host}}/api/plans/{{planId}}
+
+### 方案内整批调整（baseRevision 为方案修订号；与正式航次同一套校验；失败不改变方案）
+POST {{host}}/api/plans/{{planId}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 0,
+  "moves": [
+    { "boxNo": "BOX-3", "position": { "bay": 2, "row": 1, "tier": 0 } }
+  ]
+}
+
+### 发布方案：航次当前修订号仍等于方案来源修订号时原子写入航次新修订号并继承方案约束；
+### 否则 409 publish_conflict 且方案保留；已发布方案重复发布幂等返回首次结果
+POST {{host}}/api/plans/{{planId}}/publish
+
+### 方案迁移（航次修订号前进导致无法发布时）：
+### 提交所见方案修订号 planRevision 与所见航次修订号 voyageRevision；
+### 以来源修订号正式布局为共同基线逐箱三方合并（仅一方改动取该方、双方同位一致、目标不同 409 冲突）；
+### 撤位按空位置比较；按当前航次约束复验（违反 422 不迁移）；
+### 成功原子换来源修订号+约束快照、保存合并布局、方案修订号 +1；旧方案布局可追溯
+POST {{host}}/api/plans/{{planId}}/migrate
+Content-Type: application/json
+
+{
+  "planRevision": 1,
+  "voyageRevision": 2
+}
+
+### ========== 港序卸货审查 ==========
+
+@manifestRev = 1
+
+### 对已签发冻结清单提交港序卸货审查（有序不重复卸港 + 每箱卸港；同内容重放 replay:true）
+POST {{host}}/api/voyages/{{id}}/manifests/{{manifestRev}}/discharge-reviews
+Content-Type: application/json
+
+{
+  "ports": ["SHA", "SIN", "HAM"],
+  "items": [
+    { "boxNo": "BOX-1", "dischargePort": "SIN" },
+    { "boxNo": "BOX-2", "dischargePort": "SIN" },
+    { "boxNo": "BOX-3", "dischargePort": "SHA" },
+    { "boxNo": "BOX-4", "dischargePort": "HAM" }
+  ]
+}
+
+### 航次下的卸货审查列表（?manifestRevision=N 可只看某清单）
+GET {{host}}/api/voyages/{{id}}/discharge-reviews
+
+### 取某次卸货审查的冻结结果
+@reviewId = 00000000-0000-0000-0000-000000000000
+GET {{host}}/api/discharge-reviews/{{reviewId}}
+
+### ========== 靠泊窗口预订（依据已留档卸货审查）==========
+
+### 预订靠泊窗口（该港须有实际卸箱且无受阻箱；首次 201）
+POST {{host}}/api/discharge-reviews/{{reviewId}}/berth-bookings
+Content-Type: application/json
+
+{
+  "reviewId": "00000000-0000-0000-0000-000000000000",
+  "dischargePort": "SIN",
+  "berth": "B-7",
+  "startAt": "2026-10-10T08:00:00+08:00",
+  "endAt": "2026-10-10T12:00:00+08:00",
+  "submissionNo": "SUB-001"
+}
+
+### 同号同内容重试（等效时区，同一绝对时刻）-> 200 replay:true，返回原预订当前状态
+POST {{host}}/api/discharge-reviews/{{reviewId}}/berth-bookings
+Content-Type: application/json
+
+{
+  "reviewId": "00000000-0000-0000-0000-000000000000",
+  "dischargePort": "SIN",
+  "berth": "B-7",
+  "startAt": "2026-10-10T00:00:00Z",
+  "endAt": "2026-10-10T04:00:00Z",
+  "submissionNo": "SUB-001"
+}
+
+### 按审查查询预订与状态
+GET {{host}}/api/discharge-reviews/{{reviewId}}/berth-bookings
+
+### 按航次查询预订与状态
+GET {{host}}/api/voyages/{{id}}/berth-bookings
+
+### 取单条靠泊预订
+@bookingId = 00000000-0000-0000-0000-000000000000
+GET {{host}}/api/berth-bookings/{{bookingId}}
+
+### 取消预订（保留记录、释放占用；重复取消 replay:true）
+POST {{host}}/api/berth-bookings/{{bookingId}}/cancel
+
+### ========== 靠泊预订改期（调整已生效的预订）==========
+
+### 改期：提交新泊位 + 带时区起止 + 调整号（首次 201；原子释放旧窗口/占用新窗口，
+### 旧记录保留为已取消并关联新记录，新记录继承审查/卸港/冻结快照）
+POST {{host}}/api/berth-bookings/{{bookingId}}/adjust
+Content-Type: application/json
+
+{
+  "berth": "B-8",
+  "startAt": "2026-10-10T13:00:00+08:00",
+  "endAt": "2026-10-10T16:00:00+08:00",
+  "adjustmentNo": "ADJ-001"
+}
+
+### 同调整号同内容重试（等效时区，同一绝对时刻）-> 200 replay:true，返回新记录当前状态
+POST {{host}}/api/berth-bookings/{{bookingId}}/adjust
+Content-Type: application/json
+
+{
+  "berth": "B-8",
+  "startAt": "2026-10-10T05:00:00Z",
+  "endAt": "2026-10-10T08:00:00Z",
+  "adjustmentNo": "ADJ-001"
+}
