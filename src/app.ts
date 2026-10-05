@@ -6,6 +6,7 @@ import { CheckService } from './check-service';
 import { PlanService } from './plan-service';
 import { DischargeService } from './discharge-service';
 import { BerthBookingService } from './berth-service';
+import { RestowPlanService } from './restow-service';
 import { ping } from './db';
 
 export function createApp(pool: Pool): express.Express {
@@ -25,9 +26,17 @@ export function createApp(pool: Pool): express.Express {
   const planService = new PlanService(pool);
   const dischargeService = new DischargeService(pool);
   const berthBookingService = new BerthBookingService(pool);
+  const restowPlanService = new RestowPlanService(pool);
   app.use(
     '/api',
-    createApiRouter(service, checkService, planService, dischargeService, berthBookingService),
+    createApiRouter(
+      service,
+      checkService,
+      planService,
+      dischargeService,
+      berthBookingService,
+      restowPlanService,
+    ),
   );
 
   app.use((_req, res) => {

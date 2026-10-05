@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/start.js",
     "dev": "tsx watch src/start.ts",
-    "test": "node --require tsx/cjs --test test/validator.test.ts test/check.test.ts test/merge.test.ts test/discharge.test.ts test/berthing.test.ts",
+    "test": "node --require tsx/cjs --test test/validator.test.ts test/check.test.ts test/merge.test.ts test/discharge.test.ts test/berthing.test.ts test/restow.test.ts",
     "e2e": "node test/e2e.js",
     "e2e:check": "node test/e2e-check.js",
     "e2e:plans": "node test/e2e-plans.js",
@@ -17,6 +17,7 @@
     "e2e:discharge": "node test/e2e-discharge.js",
     "e2e:berth": "node test/e2e-berth.js",
     "e2e:adjust": "node test/e2e-adjust.js",
+    "e2e:restow": "node test/e2e-restow.js",
     "demo": "tsx examples/demo.ts"
   },
   "dependencies": {

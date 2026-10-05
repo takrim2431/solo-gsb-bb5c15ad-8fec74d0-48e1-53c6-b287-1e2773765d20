@@ -195,3 +195,31 @@ export const createDischargeReviewSchema = z
     ),
   })
   .transform((d) => ({ ports: d.ports, items: d.items }));
+
+// ---- 逐港倒箱作业方案（依据已留档卸货审查）----
+
+/**
+ * 逐港倒箱作业方案：
+ *  - temporaryCapacity：非负的临时堆位容量（0 表示不允许暂存）；
+ *  - portPlans：每港一段按序作业，港序必须与审查完全一致（业务层校验）；
+ *  - 每步 op 只能是 stage（暂存列顶后续港箱）/ replay（回放暂存箱到原列栈顶空位），
+ *    boxNo 为操作箱号；动态合法性（列顶/后续港/容量/重复暂存/安全/受阻）在模拟中逐港判定。
+ */
+export const createRestowPlanSchema = z
+  .object({
+    temporaryCapacity: nonNegativeInt,
+    portPlans: z.array(
+      z.object({
+        port: z.string().trim().min(1, '卸港不能为空').max(64),
+        operations: z
+          .array(
+            z.object({
+              op: z.enum(['stage', 'replay']),
+              boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
+            }),
+          )
+          .default([]),
+      }),
+    ),
+  })
+  .transform((d) => ({ temporaryCapacity: d.temporaryCapacity, portPlans: d.portPlans }));

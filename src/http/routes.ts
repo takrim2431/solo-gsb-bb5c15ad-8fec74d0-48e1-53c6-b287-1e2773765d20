@@ -5,6 +5,7 @@ import { CheckService } from '../check-service';
 import { PlanService } from '../plan-service';
 import { DischargeService } from '../discharge-service';
 import { BerthBookingService } from '../berth-service';
+import { RestowPlanService } from '../restow-service';
 import { HttpError } from '../errors';
 import {
   adjustBerthBookingSchema,
@@ -13,6 +14,7 @@ import {
   createBerthBookingSchema,
   createDischargeReviewSchema,
   createPlanSchema,
+  createRestowPlanSchema,
   createVoyageSchema,
   issueManifestSchema,
   migratePlanSchema,
@@ -28,6 +30,7 @@ export function createApiRouter(
   planService: PlanService,
   dischargeService: DischargeService,
   berthBookingService: BerthBookingService,
+  restowPlanService: RestowPlanService,
 ): Router {
   const router = Router();
 
@@ -164,6 +167,30 @@ export function createApiRouter(
   router.get('/discharge-reviews/:reviewId', (req, res, next) => {
     const reviewId = parseReviewId(req);
     dischargeService.getReview(reviewId).then((v) => res.json(v)).catch(next);
+  });
+
+  // ---- 逐港倒箱作业方案（依据已留档卸货审查）----
+
+  // 提交逐港倒箱作业方案（同审查同内容重试 200 replay；非法操作/安全违反/港末受阻 422 不留档）
+  router.post('/discharge-reviews/:reviewId/restow-plans', (req, res, next) => {
+    const reviewId = parseReviewId(req);
+    const input = parseBody(createRestowPlanSchema, req.body);
+    restowPlanService
+      .createPlan(reviewId, input)
+      .then((r) => res.status(r.replay ? 200 : 201).json({ replay: r.replay, ...r.plan }))
+      .catch(next);
+  });
+
+  // 按审查列出倒箱方案（不同内容分别留档）
+  router.get('/discharge-reviews/:reviewId/restow-plans', (req, res, next) => {
+    const reviewId = parseReviewId(req);
+    restowPlanService.listByReview(reviewId).then((v) => res.json(v)).catch(next);
+  });
+
+  // 取单条倒箱方案冻结结果
+  router.get('/restow-plans/:planId', (req, res, next) => {
+    const planId = parseRestowPlanId(req);
+    restowPlanService.getPlan(planId).then((v) => res.json(v)).catch(next);
   });
 
   // ---- 靠泊窗口预订（依据已留档卸货审查）----
@@ -355,6 +382,14 @@ export function createApiRouter(
     const id = req.params['bookingId'] ?? '';
     if (!UUID_RE.test(id)) {
       throw HttpError.badRequest('invalid_berth_booking_id', `靠泊预订 ID 格式非法: ${id}`);
+    }
+    return id;
+  }
+
+  function parseRestowPlanId(req: Request): string {
+    const id = req.params['planId'] ?? '';
+    if (!UUID_RE.test(id)) {
+      throw HttpError.badRequest('invalid_restow_plan_id', `倒箱作业方案 ID 格式非法: ${id}`);
     }
     return id;
   }

@@ -330,3 +330,29 @@ ALTER TABLE berth_bookings ALTER COLUMN submission_no DROP NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_berth_booking_adjustment
     ON berth_bookings (adjustment_of_id, adjustment_no)
     WHERE adjustment_no IS NOT NULL;
+
+-- ---- 逐港倒箱作业方案（restow plan）----
+-- 调度员对【已留档的港序卸货审查】提交逐港倒箱作业方案：非负临时堆位容量 + 每港按序
+-- 暂存（stage）/回放（replay）操作。模拟以审查对应清单的【冻结箱位】及该清单修订号
+-- 【当时的安全约束】为基准；成功结果随提交内容永久冻结留档。
+-- (review_id, request_hash) 唯一：同一审查 + 同一提交内容天然幂等（重试返回原结果），
+-- 同一审查允许不同内容（容量/操作序列不同）分别独立留档。
+-- 方案只引用创建时的冻结基准（manifest_items + 修订号约束快照 + boxes/voyages 不可变档案），
+-- 后续航次改位、约束更新或签发新清单【不回写】既有方案结果。
+CREATE TABLE IF NOT EXISTS restow_plans (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    review_id          UUID NOT NULL REFERENCES discharge_reviews(id) ON DELETE CASCADE,
+    -- 冗余航次与清单修订号（取自审查，冻结基准）
+    voyage_id          UUID NOT NULL REFERENCES voyages(id) ON DELETE CASCADE,
+    manifest_rev       INTEGER NOT NULL CHECK (manifest_rev >= 0),
+    -- 提交内容（临时堆位容量 + 每港按序操作）的规范化哈希（sha256，hex）
+    request_hash       TEXT NOT NULL,
+    -- 冻结的提交内容与逐港模拟结果（完整方案视图，GET 直接返回）
+    request_jsonb      JSONB NOT NULL,
+    result_jsonb       JSONB NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (review_id, request_hash),
+    FOREIGN KEY (review_id) REFERENCES discharge_reviews(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_restow_plans_review ON restow_plans (review_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_restow_plans_voyage ON restow_plans (voyage_id, created_at);

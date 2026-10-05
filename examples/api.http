@@ -288,3 +288,36 @@ Content-Type: application/json
   "endAt": "2026-10-10T08:00:00Z",
   "adjustmentNo": "ADJ-001"
 }
+
+### ========== 逐港倒箱作业方案（依据已留档卸货审查）==========
+
+### 提交逐港倒箱作业方案（首次 201；同内容重试 200 replay:true）
+### 容量 2：SHA 暂存两压箱露出本港箱，远港箱先回放落底层、近港箱回放落上层，
+### 使 SIN/HAM 自动连锁卸空；每次 stage 计一次倒箱
+@reviewId = 00000000-0000-0000-0000-000000000000
+POST {{host}}/api/discharge-reviews/{{reviewId}}/restow-plans
+Content-Type: application/json
+
+{
+  "temporaryCapacity": 2,
+  "portPlans": [
+    {
+      "port": "SHA",
+      "operations": [
+        { "op": "stage",  "boxNo": "BOX-3" },
+        { "op": "stage",  "boxNo": "BOX-2" },
+        { "op": "replay", "boxNo": "BOX-3" },
+        { "op": "replay", "boxNo": "BOX-2" }
+      ]
+    },
+    { "port": "SIN", "operations": [] },
+    { "port": "HAM", "operations": [] }
+  ]
+}
+
+### 按审查列出全部倒箱方案（不同内容分别留档；被拒绝的不留档）
+GET {{host}}/api/discharge-reviews/{{reviewId}}/restow-plans
+
+### 取单条倒箱方案冻结结果
+@planId = 00000000-0000-0000-0000-000000000000
+GET {{host}}/api/restow-plans/{{planId}}
