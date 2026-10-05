@@ -18,6 +18,8 @@ TypeScript / Node.js + PostgreSQL 实现的危险货箱三维舱位配载审定�
 
 已生效的预订还可**改期（adjust）**：提交原预订 ID、新泊位、带时区的起止时刻与调整号。**仅在原预订仍有效时受理**；受理时**释放旧窗口与占用新窗口在同一事务内原子完成**——旧记录保留为已取消并以 `replacedByBookingId` 关联新记录，新记录继承原审查、卸港及冻结的清单修订号与实际卸箱数。无效时刻、已取消原预订、调整号冲突或新窗口被占用时**不改变原预订**；新窗口沿用同审查同港唯一、同港同泊位跨航次不重叠与半开区间首尾相接可用的规则。调整号在同一原预订内唯一：同号同内容重试返回**新记录当前状态**（幂等），同号改内容报冲突；起止时刻按绝对时刻比较。
 
+针对已留档的卸货审查，调度员还可提交**逐港倒箱作业方案（restow plan）**：给出审查 ID、非负的临时堆位容量及每港按序的暂存（stash）/回放（restore）操作（港序须与审查一致）。模拟以该审查对应清单的**冻结箱位及当时安全约束**为基准：每港开始及每步操作后反复卸走可及的本港箱；**只能暂存当前列顶且属于后续港的箱**（同箱不得重复暂存、容量不得超限、每次暂存计一次倒箱、暂存箱不计入船上安全约束），**回放只能把暂存箱放回原列当前栈顶空位**，暂存箱不得跨港滞留。未知审查、非法操作、任一步违反列承重或危险品间距、某港结束仍有本港箱受阻时**整份拒绝并返回原因与相关箱号，不留档**；成功时按港返回操作后箱位、实际卸箱与倒箱次数并**冻结留档**——后续航次改位、约束更新或签发新清单均不回写。同一审查同内容重试幂等返回原结果，不同内容分别留档。
+
 ---
 
 ## 1. 模型与规则
@@ -165,6 +167,7 @@ npm run build && node test/e2e-migrate.js    # 方案迁移/三方合并/冲突/
 npm run build && node test/e2e-discharge.js  # 港序卸货审查/逐港模拟/阻挡链/逾港/冻结不变/拒绝/幂等
 npm run build && node test/e2e-berth.js     # 靠泊预订/窗口互斥/跨航次/并发一方成功/幂等/取消释放/冻结不回写
 npm run build && node test/e2e-adjust.js    # 靠泊改期/原子换窗/继承冻结快照/调整号幂等冲突/失败不改原预订/链式/并发
+npm run build && node test/e2e-restow.js    # 逐港倒箱方案/暂存回放模拟/安全约束复验/拒绝不留档/幂等/并发/冻结不回写
 ```
 
 ---
@@ -205,6 +208,10 @@ npm run build && node test/e2e-adjust.js    # 靠泊改期/原子换窗/继承�
 | `GET` | `/api/berth-bookings/:bookingId` | 取单条靠泊预订 |
 | `POST` | `/api/berth-bookings/:bookingId/cancel` | **取消预订**（保留记录、释放占用；重复取消幂等） |
 | `POST` | `/api/berth-bookings/:bookingId/adjust` | **改期预订**（新泊位+带时区窗口+调整号；原子换窗，旧记录关联新记录） |
+| `POST` | `/api/discharge-reviews/:reviewId/restow-plans` | **提交逐港倒箱作业方案**（容量+每港暂存/回放操作；同审查同内容幂等） |
+| `GET` | `/api/discharge-reviews/:reviewId/restow-plans` | 按审查查询倒箱方案（仅成功留档的方案） |
+| `GET` | `/api/voyages/:id/restow-plans` | 按航次查询倒箱方案 |
+| `GET` | `/api/restow-plans/:restowPlanId` | 取单份倒箱方案的冻结结果 |
 | `GET` | `/health` | 健康检查（含数据库连通性） |
 
 ### 4.1 登记航次
@@ -795,15 +802,129 @@ curl -sS -X POST http://localhost:3000/api/berth-bookings/<bookingId>/adjust \
 | 409 | `booking_adjustment_conflict` | 调整号已用于该原预订的不同改期内容 |
 | 409 | `berth_window_overlap` | 新窗口与同港同泊位其他有效窗口重叠（含并发竞争失败方） |
 
+### 4.13 逐港倒箱作业方案（按冻结清单与当时约束逐港模拟，暂存/回放）
+
+卸货审查只判定“不倒箱是否可行”；审查留档后，调度员可进一步提交**逐港倒箱作业方案**，用有限的临时堆位把压舱的后续港箱暂存-回放，使原本不可行的港序变得可行。模拟基准与审查一致——**该审查对应清单的冻结箱位（`manifest_items`）及该清单修订号当时生效的安全约束**（默认列承重/按列覆盖/不相容类别对），不读取当前布局与当前约束，因此航次后续改位、约束更新或签发新清单都**不改变**任何已留档方案的结果。
+
+**提交**（路径 `:reviewId` 为已留档审查；请求体给出容量与每港按序操作）：
+
+```bash
+curl -sS -X POST http://localhost:3000/api/discharge-reviews/<reviewId>/restow-plans \
+  -H 'content-type: application/json' -d '{
+  "capacity": 2,
+  "ports": [
+    { "port": "SHA", "operations": [
+      { "action": "stash",   "boxNo": "BOX-3" },
+      { "action": "stash",   "boxNo": "BOX-2" },
+      { "action": "restore", "boxNo": "BOX-3" },
+      { "action": "restore", "boxNo": "BOX-2" }
+    ] },
+    { "port": "SIN", "operations": [] },
+    { "port": "HAM", "operations": [] }
+  ]
+}'
+```
+
+字段要求：
+
+- `capacity`：**非负整数**临时堆位容量（同时在暂存中的箱数上限；`0` 表示不允许任何暂存）；
+- `ports`：每港一段，`port` + 按序 `operations`；**港序必须与审查完全一致**（同长度、同顺序；无操作的港给空 `operations`），否则 400 `invalid_restow_plan`（issue `port_order_mismatch`，回带期望与提交的港序）；
+- 每个操作：`action` 为 `stash`（暂存）或 `restore`（回放），`boxNo` 为操作对象；落点由模拟推导，客户端不指定位置。
+
+**模拟语义**（列＝同一 `(bay,row)` 垂直堆叠，只有列顶箱可直接卸/暂存）：
+
+1. 按审查港序逐港作业；**每港开始及每步操作后**，反复卸走“列顶且卸港为本港”的箱直到再无可卸箱（同港箱叠放可连锁卸出）；
+2. **暂存（stash）**：只能暂存**当前列顶且属于后续港**的箱；同箱全程至多暂存一次；暂存后箱数不得超过 `capacity`；**每次暂存计一次倒箱**；暂存中的箱**不计入船上安全约束**；
+3. **回放（restore）**：只能把暂存箱放回**原列当前栈顶空位**（下层箱已卸走时落点层随之下降，箱在船时列不变）；
+4. **每步后复验船上安全约束**：仅列承重与危险品间距两项（列连续性由操作语义结构性保证），任一违反即整份拒绝；
+5. **暂存箱不得跨港滞留**：每港结束时临时堆位必须为空；
+6. **某港结束时仍有本港箱在船（受阻）即整份拒绝**——全部港次走完且每港卸空、暂存为空，方案才可行。
+
+**响应**（201 首次创建；`simulation` 为完整模拟结果，按港给出操作后箱位、实际卸箱与倒箱次数）：
+
+```json
+{
+  "replay": false,
+  "planId": "…uuid…",
+  "reviewId": "…", "voyageId": "…", "manifestRevision": 1,
+  "requestHash": "…sha256…", "createdAt": "…",
+  "capacity": 2,
+  "ports": [ …与提交一致… ],
+  "simulation": {
+    "ports": ["SHA", "SIN", "HAM"],
+    "portResults": [
+      {
+        "port": "SHA", "portIndex": 1,
+        "discharged": [
+          { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+          { "boxNo": "BOX-4", "position": { "bay": 2, "row": 1, "tier": 0 } }
+        ],
+        "restows": 2,
+        "placements": [
+          { "boxNo": "BOX-2", "position": { "bay": 1, "row": 1, "tier": 1 } },
+          { "boxNo": "BOX-3", "position": { "bay": 1, "row": 1, "tier": 0 } }
+        ]
+      },
+      {
+        "port": "SIN", "portIndex": 2,
+        "discharged": [ { "boxNo": "BOX-2", "position": { "bay": 1, "row": 1, "tier": 1 } } ],
+        "restows": 0,
+        "placements": [ { "boxNo": "BOX-3", "position": { "bay": 1, "row": 1, "tier": 0 } } ]
+      },
+      {
+        "port": "HAM", "portIndex": 3,
+        "discharged": [ { "boxNo": "BOX-3", "position": { "bay": 1, "row": 1, "tier": 0 } } ],
+        "restows": 0,
+        "placements": []
+      }
+    ],
+    "counts": { "totalBoxes": 4, "discharged": 4, "restows": 2 }
+  }
+}
+```
+
+各港字段：`discharged` 本港实际卸走的箱（箱位为卸下时所在位置）、`restows` 本港暂存次数（每次暂存计一次倒箱）、`placements` 本港作业结束后仍在船的箱位（操作后箱位）。
+
+**拒绝（整份方案拒绝、返回原因与相关箱号、不留档）**：
+
+| 状态 | 错误码 | 场景 |
+| --- | --- | --- |
+| 400 | `invalid_request_body` | 请求体缺字段/类型不符：容量为负或非整数、操作类型非法（zod 校验） |
+| 400 | `invalid_discharge_review_id` / `invalid_restow_plan_id` | 路径 ID 非 UUID |
+| 400 | `invalid_restow_plan` | 港序与审查不一致（`port_order_mismatch`）或非法操作（`issues[]` 给出首个非法操作及箱号） |
+| 404 | `discharge_review_not_found` / `restow_plan_not_found` | 未知审查 / 未知方案 |
+| 422 | `restow_safety_violation` | 任一步后船上布局违反列承重或危险品间距（`details` 含港/步序/操作与 `violations[]`，与配载校验同构） |
+| 422 | `port_boxes_blocked` | 某港结束仍有本港箱受阻留船（`details.blocked[]` 含受阻箱与同列上方阻挡箱） |
+
+非法操作的 `reason` 一览（均带 `port`/`portIndex`/`opIndex` 与相关箱号）：
+
+| `reason` | 含义 |
+| --- | --- |
+| `box_not_aboard` | 暂存的箱不在船上（未知箱或已卸走） |
+| `box_already_stashed` | 该箱当前已在临时堆位中 |
+| `box_already_restowed` | 该箱曾被暂存过，同箱不得重复暂存 |
+| `box_not_column_top` | 暂存的箱不在当前列顶（给出其箱位） |
+| `box_not_later_port` | 暂存的箱不属于后续港 |
+| `capacity_exceeded` | 暂存将超出临时堆位容量（给出容量与当前暂存箱号） |
+| `box_not_stashed` | 回放的箱不在临时堆位中 |
+| `stash_lingering_across_port` | 港结束时仍有暂存箱未回放（跨港滞留） |
+
+**冻结、幂等与查询**：
+
+- 同一审查 + 同一提交内容（容量与按序操作的 sha256 指纹）重复提交 → **200 `replay:true`**，返回首次方案的同一 `planId` 与冻结结果，不重新模拟、不新建记录；并发同内容提交由审查行锁串行化，同样只有一份留档；
+- 同一审查允许按**不同内容**多次提交，各自独立留档；**拒绝的方案一律不留档**；
+- `GET /api/discharge-reviews/:reviewId/restow-plans` 按审查列出方案；`GET /api/voyages/:id/restow-plans` 按航次列出；`GET /api/restow-plans/:restowPlanId` 取单份冻结结果；
+- 方案结果在创建时即随提交内容落库（`restow_plans`），航次后续改位、约束更新或签发新清单后，旧方案仍返回原冻结结果（不回写）。
+
 ### 状态码约定
 
 | 状态 | 场景 |
 | --- | --- |
 | 200 / 201 | 查询成功 / 创建或首次签发、首次受理上报、首次结案成功、首次发布方案（幂等重试返回 200） |
-| 400 | 请求体非法、未知箱、坐标越界、靠泊预订的非法/缺时区时刻（`invalid_time_window`：`unparsable_time`/`start_not_before_end`，预订与改期共用）、同港同泊位冲突的请求级前置校验；同批重复箱号；约束变更的非正承重/越界列坐标/重复类别对或重复列覆盖；方案 ID 格式非法；**卸货审查的空/重复港序（`invalid_discharge_request`，issues：`empty_port_order`/`duplicate_port_in_order`/`duplicate_box_in_request`/`unknown_box_for_manifest`/`manifest_box_missing`/`unknown_discharge_port`）；靠泊预订审查外卸港（`unknown_discharge_port_for_review`）** |
-| 404 | 航次/修订号/清单/核对作业/试排方案/**卸货审查/靠泊预订**不存在（含以未签发清单开工或审查） |
+| 400 | 请求体非法、未知箱、坐标越界、靠泊预订的非法/缺时区时刻（`invalid_time_window`：`unparsable_time`/`start_not_before_end`，预订与改期共用）、同港同泊位冲突的请求级前置校验；同批重复箱号；约束变更的非正承重/越界列坐标/重复类别对或重复列覆盖；方案 ID 格式非法；**卸货审查的空/重复港序（`invalid_discharge_request`，issues：`empty_port_order`/`duplicate_port_in_order`/`duplicate_box_in_request`/`unknown_box_for_manifest`/`manifest_box_missing`/`unknown_discharge_port`）；靠泊预订审查外卸港（`unknown_discharge_port_for_review`）；倒箱方案的港序不一致或非法操作（`invalid_restow_plan`，issues：`port_order_mismatch`/`box_not_aboard`/`box_already_stashed`/`box_already_restowed`/`box_not_column_top`/`box_not_later_port`/`capacity_exceeded`/`box_not_stashed`/`stash_lingering_across_port`）** |
+| 404 | 航次/修订号/清单/核对作业/试排方案/**卸货审查/靠泊预订/倒箱作业方案**不存在（含以未签发清单开工或审查） |
 | 409 | 修订号过期（整批调整、约束变更、签发、方案内调整、**方案迁移（分方案/航次两个 scope）**共用）；同清单重复开工、上报号内容冲突、结案后新上报、核对有差异不可结案；方案已发布（`plan_published`）、航次修订号偏离方案来源（`publish_conflict`）、**方案迁移双方改动目标不同（`migration_conflict`）或无需迁移（`migration_not_needed`）；靠泊窗口重叠（`berth_window_overlap`，含跨航次与并发竞争）、同审查同卸港重复有效预订（`booking_exists_for_port`）、提交号内容冲突（`booking_submission_conflict`）；改期时原预订已失效（`booking_not_active`）、调整号内容冲突（`booking_adjustment_conflict`）** |
-| 422 | 配载规则违反整批拒绝（整批调整、约束变更复验、方案内调整、**方案迁移按当前航次约束复验**）；或尚有箱未配位即签发；**靠泊预订的卸港无实际卸箱或有受阻箱（`port_not_dischargeable`）** |
+| 422 | 配载规则违反整批拒绝（整批调整、约束变更复验、方案内调整、**方案迁移按当前航次约束复验**）；或尚有箱未配位即签发；**靠泊预订的卸港无实际卸箱或有受阻箱（`port_not_dischargeable`）；倒箱方案任一步违反列承重/危险品间距（`restow_safety_violation`）或港末仍有本港箱受阻（`port_boxes_blocked`）** |
 | 503 | `/health` 数据库不可达 |
 
 ---
@@ -858,6 +979,12 @@ curl -sS -X POST http://localhost:3000/api/berth-bookings/<bookingId>/adjust \
   BASE=http://localhost:3000 bash examples/adjust-curl.sh
   ```
 
+- `examples/restow-curl.sh` —— 逐港倒箱作业方案全流程 curl（自备不可行卸货审查→可行方案 201 逐港卸空/倒箱计数→同内容重放/不同内容分别留档→港序不一致/非列顶/容量超限/跨港滞留/港末受阻/危险品间距违反拒绝→查询→改位+约束更新+新清单后冻结结果不变）：
+
+  ```bash
+  BASE=http://localhost:3000 bash examples/restow-curl.sh
+  ```
+
 - `examples/api.http` —— REST Client / JetBrains HTTP Client 文件（含核对段落）；
 - `examples/demo.ts` —— Node 示例（内置 fetch）：
 
@@ -874,14 +1001,16 @@ src/
   domain.ts        领域模型 + 纯函数规则校验（最终布局五项规则、请求级检查、十进制重量、迁移三方合并）
   check.ts         装船核对纯函数（最后上报汇总、应装/已核对/缺失/错位/清单外、结案条件）
   discharge.ts     港序卸货模拟纯函数（请求级校验、逐港列顶卸货迭代、阻挡链关系、逾港未卸、可行性）
+  restow.ts        逐港倒箱模拟纯函数（港序一致性校验、暂存/回放状态机、每步安全约束复验、港末受阻判定）
   berthing.ts      靠泊预订纯函数（带时区窗口解析/起点早于终点、卸港受理判定=有实卸且无受阻、提交/改期内容一致性）
   service.ts       事务编排：乐观修订号、整批调整、签发冻结、并发互斥
   check-service.ts 核对作业事务：开工/上报幂等与冲突/留痕/状态/结案冻结（行级互斥）
   discharge-service.ts 卸货审查事务：清单冻结箱位读取、请求校验、模拟落档、同内容幂等（永久留档）
+  restow-service.ts 倒箱方案事务：审查/清单冻结箱位/当时约束读取、港序校验、模拟落档、同审查同内容幂等（拒绝不留档）
   berth-service.ts 靠泊预订事务：审查冻结结果读取、受理判定、提交号幂等/冲突、窗口排他与同港唯一（DB 约束兜底并发）、取消释放；改期=原子换窗（旧记录取消并关联新记录、新记录继承冻结快照、调整号幂等/冲突）
   plan-service.ts  试排方案事务：建立快照/方案内整批调整/查询/发布/迁移rebase（方案行 + 航次行互斥）
   db.ts            连接池、等待就绪、幂等建表
-  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单/核对作业与上报/试排方案/卸货审查/靠泊预订）
+  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单/核对作业与上报/试排方案/卸货审查/靠泊预订/倒箱方案）
   http/            Express 路由与 zod 请求校验
   config.ts errors.ts app.ts start.ts
 test/
@@ -889,6 +1018,7 @@ test/
   check.test.ts      核对纯函数单元测试
   merge.test.ts      方案迁移三方合并纯函数单元测试（一方改动/双方同位/撤位/冲突）
   discharge.test.ts  港序卸货模拟纯函数单元测试（列顶迭代/连锁卸/阻挡 same/later/earlier/逾港/请求拒绝）
+  restow.test.ts     逐港倒箱模拟纯函数单元测试（暂存回放/连锁卸/容量/重复暂存/跨港滞留/港末受阻/安全复验/港序校验）
   berthing.test.ts   靠泊预订纯函数单元测试（带时区窗口/起点早于终点、等效时区、卸港受理判定、提交/改期内容一致性）
   e2e.js             对真实 PostgreSQL 的端到端/并发验证（开发辅助）
   e2e-check.js       核对作业端到端/并发验证（开发辅助）
@@ -898,6 +1028,7 @@ test/
   e2e-discharge.js   港序卸货审查端到端/逐港模拟/阻挡链/逾港/冻结不变/拒绝/幂等（开发辅助）
   e2e-berth.js       靠泊预订端到端/窗口互斥/首尾相接/跨航次/并发一方成功/幂等冲突/取消释放/冻结不回写（开发辅助）
   e2e-adjust.js      靠泊改期端到端/原子换窗/继承冻结快照/调整号幂等冲突/失败不改原预订/自我平移/链式/并发（开发辅助）
+  e2e-restow.js      逐港倒箱方案端到端/暂存回放模拟/安全约束复验/拒绝不留档/幂等/并发/冻结不回写（开发辅助）
 examples/          curl / .http / Node 调用示例
 Dockerfile  docker-compose.yml
 ```
@@ -917,5 +1048,6 @@ Dockerfile  docker-compose.yml
 - `discharge_reviews` 保存港序卸货审查：`(voyage_id, manifest_rev, request_hash)` 唯一使“同清单 + 同提交内容”天然幂等；`request_jsonb` 冻结有序港序与每箱卸港，`result_jsonb` 冻结逐港模拟结果（各港实卸/受阻/阻挡箱与箱位/逾港未卸/可行性）。审查只读取 `manifest_items` 冻结箱位，**航次后续调整或签发新清单不改变旧审查结论**；同一清单的不同港序/卸港申报各自独立留档。
 - `berth_bookings` 保存靠泊窗口预订：`(review_id, submission_no)` 唯一保证提交号在审查内唯一（支撑同号同内容幂等）；**部分唯一索引** `(review_id, discharge_port) WHERE status='booked'` 保证同一审查同一卸港至多一个有效预订；**部分 GiST 排他约束** `EXCLUDE (discharge_port WITH =, berth WITH =, tstzrange(start_at,end_at,'[)') WITH &&) WHERE status='booked'` 保证同港同泊位有效窗口不重叠（半开区间故首尾相接可用），该约束不区分审查/航次，故**跨航次同名港+同名泊位同样互斥，并发 INSERT 只成功一方**（依赖 `btree_gist` 扩展为文本列提供 GiST `=` 操作类）。取消只把 `status` 置 `cancelled` 并记 `cancelled_at`：记录保留，且因两个部分约束只含 `booked`，占用立即释放。`manifest_rev` 与 `port_box_count` 在受理时从审查冻结结果复制快照，**后续审查调整或签发新清单不回写**；时刻以 `TIMESTAMPTZ` 存储，对外统一 UTC ISO 8601。
 - **改期**在同一事务内完成“旧记录置 `cancelled` + 插入新记录 + 旧记录回写 `replaced_by_id`”：新记录继承原 `review_id`/`voyage_id`/`discharge_port`/`manifest_rev`/`port_box_count`（冻结快照延续），`submission_no` 置空（原提交号永远指向原记录，其重试行为不变），并以 `adjustment_of_id` 指回原预订、`adjustment_no` 记录调整号；**部分唯一索引** `(adjustment_of_id, adjustment_no) WHERE adjustment_no IS NOT NULL` 保证同一原预订的调整号唯一（支撑同号同内容幂等）。新记录同样受上述两个 `booked` 部分约束把关，故同审查同港唯一与跨航次窗口互斥对改期窗口同样生效；同一原预订的并发改期由原预订行锁串行化。以上对既有库通过幂等 `ALTER TABLE ... IF NOT EXISTS` / `DROP NOT NULL` 就地升级。
+- `restow_plans` 保存逐港倒箱作业方案：`(review_id, request_hash)` 唯一使“同一审查 + 同一提交内容”天然幂等（提交经审查行 `SELECT ... FOR UPDATE` 串行化，并发同内容只有一份留档）；`request_jsonb` 冻结容量与每港按序操作，`result_jsonb` 冻结逐港模拟结果（各港操作后箱位/实际卸箱/倒箱次数与总计数）。模拟只读取审查对应清单的 `manifest_items` 冻结箱位与该清单修订号的约束快照，**航次后续改位、约束更新或签发新清单不回写已冻结方案**；被拒绝的方案不落库，故表中只有成功方案。
 
 > 从早期“约束不随修订号留痕”的版本升级时，`src/schema.sql` 启动会幂等地把旧的 `column_weight_limits` / `incompat_rules`（当时全局且不可变）回填为每个历史修订号的快照，再删除旧表；新库不受影响。

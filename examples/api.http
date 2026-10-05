@@ -288,3 +288,35 @@ Content-Type: application/json
   "endAt": "2026-10-10T08:00:00Z",
   "adjustmentNo": "ADJ-001"
 }
+
+### ========== 逐港倒箱作业方案（依据已留档卸货审查）==========
+
+### 提交倒箱方案：非负临时堆位容量 + 每港按序的暂存(stash)/回放(restore)操作
+### （港序须与审查一致；暂存仅限列顶后续港箱、同箱至多一次、容量不得超限、
+###  回放放回原列当前栈顶空位、暂存箱不得跨港滞留；首次 201，同内容重试 200 replay:true）
+POST {{host}}/api/discharge-reviews/{{reviewId}}/restow-plans
+Content-Type: application/json
+
+{
+  "capacity": 2,
+  "ports": [
+    { "port": "SHA", "operations": [
+      { "action": "stash",   "boxNo": "BOX-3" },
+      { "action": "stash",   "boxNo": "BOX-2" },
+      { "action": "restore", "boxNo": "BOX-3" },
+      { "action": "restore", "boxNo": "BOX-2" }
+    ] },
+    { "port": "SIN", "operations": [] },
+    { "port": "HAM", "operations": [] }
+  ]
+}
+
+### 按审查查询倒箱方案（仅成功留档的方案）
+GET {{host}}/api/discharge-reviews/{{reviewId}}/restow-plans
+
+### 按航次查询倒箱方案
+GET {{host}}/api/voyages/{{id}}/restow-plans
+
+### 取单份倒箱方案的冻结结果
+@restowPlanId = 00000000-0000-0000-0000-000000000000
+GET {{host}}/api/restow-plans/{{restowPlanId}}

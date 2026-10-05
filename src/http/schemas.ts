@@ -195,3 +195,28 @@ export const createDischargeReviewSchema = z
     ),
   })
   .transform((d) => ({ ports: d.ports, items: d.items }));
+
+// ---- 逐港倒箱作业方案 ----
+
+/**
+ * 对已留档的卸货审查提交逐港倒箱作业方案：
+ *  - capacity：非负临时堆位容量（同时在暂存中的箱数上限）；
+ *  - ports：每港按序的暂存（stash，计一次倒箱）/回放（restore，放回原列栈顶空位）
+ *    操作；港序必须与审查完全一致（业务层校验），无操作的港给空 operations 即可。
+ */
+export const createRestowPlanSchema = z
+  .object({
+    capacity: z.number().int('临时堆位容量必须为整数').min(0, '临时堆位容量必须为非负整数'),
+    ports: z.array(
+      z.object({
+        port: z.string().trim().min(1, '卸港名不能为空').max(64),
+        operations: z.array(
+          z.object({
+            action: z.enum(['stash', 'restore']),
+            boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
+          }),
+        ),
+      }),
+    ),
+  })
+  .transform((d) => ({ capacity: d.capacity, ports: d.ports }));
